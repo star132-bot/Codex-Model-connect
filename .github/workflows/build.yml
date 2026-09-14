@@ -1,0 +1,52 @@
+name: Build desktop releases
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and self-test
+        run: |
+          zsh scripts/build-app.sh
+          'dist/Codex Model Manager.app/Contents/MacOS/CodexModelManager' --self-test
+      - name: Package
+        run: |
+          mkdir -p release/macos
+          ditto 'dist/Codex Model Manager.app' 'release/macos/Codex Model Manager.app'
+          cp scripts/install-macos.command 'release/macos/Install Codex Model Manager.command'
+          chmod 755 'release/macos/Install Codex Model Manager.command'
+          ditto -c -k --sequesterRsrc --keepParent release/macos release/Codex-Model-Manager-macOS.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Codex-Model-Manager-macOS
+          path: release/Codex-Model-Manager-macOS.zip
+
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Build
+        run: dotnet build windows/CodexModelManager.Windows.csproj -c Release
+      - name: Publish single-file app
+        run: dotnet publish windows/CodexModelManager.Windows.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o dist/windows-x64
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release/windows-x64 | Out-Null
+          Copy-Item dist/windows-x64/CodexModelManager.exe release/windows-x64/
+          Copy-Item windows/install.ps1 release/windows-x64/Install.ps1
+          Copy-Item windows/uninstall.ps1 release/windows-x64/Uninstall.ps1
+          Compress-Archive release/windows-x64/* release/Codex-Model-Manager-Windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Codex-Model-Manager-Windows-x64
+          path: release/Codex-Model-Manager-Windows-x64.zip

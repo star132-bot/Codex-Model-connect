@@ -1,0 +1,25 @@
+{
+  "name": "codex-model-manager",
+  "version": "0.2.0",
+  "description": "Open a compact native panel to manage custom Codex model providers and switch the active model.",
+  "author": {
+    "name": "Local developer"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Codex \u6a21\u578b\u7ba1\u7406\u5668",
+    "shortDescription": "\u7528\u539f\u751f\u5feb\u6377\u9762\u677f\u7ba1\u7406 Codex \u6a21\u578b\u5382\u5546\u3002",
+    "longDescription": "\u5728 macOS \u548c Windows \u4e0a\u7ba1\u7406\u3001\u9a8c\u8bc1\u548c\u5207\u6362\u81ea\u5b9a\u4e49 Codex \u6a21\u578b\uff1b\u5bc6\u94a5\u7531\u7cfb\u7edf\u51ed\u636e\u5e93\u4fdd\u5b58\u3002",
+    "developerName": "Local developer",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "\u6253\u5f00 Codex \u6a21\u578b\u7ba1\u7406\u5668",
+      "\u6253\u5f00\u6a21\u578b\u5382\u5546\u5feb\u6377\u9762\u677f"
+    ],
+    "brandColor": "#5B6CFF"
+  }
+}
