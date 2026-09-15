@@ -7,7 +7,6 @@ public partial class MainWindow : Window
 {
     private readonly ManagerService manager = new();
     private ProviderRecord? editing;
-    private bool loading;
 
     public MainWindow()
     {
@@ -18,7 +17,6 @@ public partial class MainWindow : Window
 
     private void Reload()
     {
-        loading = true;
         ProviderList.Items.Clear();
         foreach (var provider in manager.State.Providers)
         {
@@ -30,7 +28,6 @@ public partial class MainWindow : Window
             ProviderList.Items.Add(item);
         }
         ActiveTitle.Text = manager.ActiveTitle;
-        loading = false;
     }
 
     private void AddProvider(object sender, RoutedEventArgs e) => ClearEditor();
