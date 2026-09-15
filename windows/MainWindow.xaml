@@ -19,7 +19,8 @@
           <TextBlock Text="当前 Codex 保留 GPT 与本地工具；外部模型只处理委派的子任务" Foreground="#777" Margin="0,3,0,0" />
         </StackPanel>
         <StackPanel Grid.Column="1" Orientation="Horizontal">
-          <Border Background="#E8F2FF" CornerRadius="7" Padding="12,7" Margin="4"><TextBlock Text="安全委派 · config.toml 只读" Foreground="#075DB7" /></Border>
+          <Border Background="#E8F2FF" CornerRadius="7" Padding="12,7" Margin="4"><TextBlock Text="安全委派 · 配置成对切换" Foreground="#075DB7" /></Border>
+          <Button Content="配置方案" Click="OpenConfigurationProfiles" />
           <Button Content="清除默认委派" Click="UseGpt" />
           <Button Content="Antigravity 账号" Click="OpenAntigravity" />
           <Button Content="＋ 添加厂商" Click="AddProvider" Background="#0A7AFF" Foreground="White" />
@@ -64,7 +65,7 @@
             <Button x:Name="DeleteButton" Content="删除" Click="DeleteProvider" Foreground="#C62828" Visibility="Collapsed" />
           </StackPanel>
           <Border Background="#FFF7E8" CornerRadius="8" Padding="12" Margin="0,18,0,0">
-            <TextBlock TextWrapping="Wrap" Foreground="#8A5A00">外部模型保存在独立配置中，~/.codex/config.toml 始终只读。Codex 通过 delegate_task 委派文字任务，本地工具仍由当前 GPT 任务执行。</TextBlock>
+            <TextBlock TextWrapping="Wrap" Foreground="#8A5A00">外部委派模型独立保存。只有在“配置方案”中点击一键切换，才会成对替换 config.toml 与 auth.json。</TextBlock>
           </Border>
         </StackPanel>
       </ScrollViewer>

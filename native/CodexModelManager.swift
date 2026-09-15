@@ -278,6 +278,29 @@ struct ModelProvider: Codable, Identifiable, Equatable {
     }
 }
 
+enum CodexConfigurationKind: String, Codable {
+    case chatGPT
+    case relay
+    case imported
+
+    var title: String {
+        switch self {
+        case .chatGPT: return "ChatGPT 登录"
+        case .relay: return "API 中转"
+        case .imported: return "导入配置"
+        }
+    }
+}
+
+struct CodexConfigurationProfile: Codable, Identifiable, Equatable {
+    var id: String
+    var name: String
+    var kind: CodexConfigurationKind
+    var model: String
+    var baseURL: String?
+    var updatedAt: Date
+}
+
 struct PersistedState: Codable {
     var providers: [ModelProvider]
     var activeProviderID: String
@@ -289,6 +312,8 @@ struct PersistedState: Codable {
     var previousNoProxyCaptured: Bool?
     var configurationMode: ConfigurationMode
     var externalProviderID: String?
+    var configurationProfiles: [CodexConfigurationProfile]
+    var activeConfigurationProfileID: String?
 
     init(
         providers: [ModelProvider] = [],
@@ -300,7 +325,9 @@ struct PersistedState: Codable {
         previousNoProxy: String? = nil,
         previousNoProxyCaptured: Bool? = nil,
         configurationMode: ConfigurationMode = .isolatedProfile,
-        externalProviderID: String? = nil
+        externalProviderID: String? = nil,
+        configurationProfiles: [CodexConfigurationProfile] = [],
+        activeConfigurationProfileID: String? = nil
     ) {
         self.providers = providers
         self.activeProviderID = activeProviderID
@@ -312,6 +339,8 @@ struct PersistedState: Codable {
         self.previousNoProxyCaptured = previousNoProxyCaptured
         self.configurationMode = configurationMode
         self.externalProviderID = externalProviderID
+        self.configurationProfiles = configurationProfiles
+        self.activeConfigurationProfileID = activeConfigurationProfileID
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -325,6 +354,8 @@ struct PersistedState: Codable {
         case previousNoProxyCaptured
         case configurationMode
         case externalProviderID
+        case configurationProfiles
+        case activeConfigurationProfileID
     }
 
     init(from decoder: Decoder) throws {
@@ -340,6 +371,8 @@ struct PersistedState: Codable {
         configurationMode = try container.decodeIfPresent(ConfigurationMode.self, forKey: .configurationMode)
             ?? .isolatedProfile
         externalProviderID = try container.decodeIfPresent(String.self, forKey: .externalProviderID)
+        configurationProfiles = try container.decodeIfPresent([CodexConfigurationProfile].self, forKey: .configurationProfiles) ?? []
+        activeConfigurationProfileID = try container.decodeIfPresent(String.self, forKey: .activeConfigurationProfileID)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -354,6 +387,8 @@ struct PersistedState: Codable {
         try container.encodeIfPresent(previousNoProxyCaptured, forKey: .previousNoProxyCaptured)
         try container.encode(configurationMode, forKey: .configurationMode)
         try container.encodeIfPresent(externalProviderID, forKey: .externalProviderID)
+        try container.encode(configurationProfiles, forKey: .configurationProfiles)
+        try container.encodeIfPresent(activeConfigurationProfileID, forKey: .activeConfigurationProfileID)
     }
 }
 
@@ -544,6 +579,161 @@ struct ConfigManager {
         let text = try String(contentsOf: configURL, encoding: .utf8)
         return (topLevelValue("model_provider", in: text) ?? "openai",
                 topLevelValue("model", in: text) ?? "")
+    }
+
+    private var authURL: URL {
+        configURL.deletingLastPathComponent().appendingPathComponent("auth.json")
+    }
+
+    private var configurationProfilesDirectory: URL {
+        dataDirectory.appendingPathComponent("configuration-profiles", isDirectory: true)
+    }
+
+    private func configurationProfileAuthAccount(_ id: String) -> String {
+        "configuration-profile-auth-\(id)"
+    }
+
+    func captureCurrentConfiguration(name: String, kind: CodexConfigurationKind) throws -> CodexConfigurationProfile {
+        guard FileManager.default.fileExists(atPath: configURL.path),
+              FileManager.default.fileExists(atPath: authURL.path) else {
+            throw ManagerError.message("当前 config.toml 或 auth.json 不存在")
+        }
+        return try saveConfigurationPair(
+            name: name,
+            kind: kind,
+            configText: String(contentsOf: configURL, encoding: .utf8),
+            authText: String(contentsOf: authURL, encoding: .utf8)
+        )
+    }
+
+    func importConfigurationPair(name: String, directory: URL) throws -> CodexConfigurationProfile {
+        let importedConfig = directory.appendingPathComponent("config.toml")
+        let importedAuth = directory.appendingPathComponent("auth.json")
+        guard FileManager.default.fileExists(atPath: importedConfig.path),
+              FileManager.default.fileExists(atPath: importedAuth.path) else {
+            throw ManagerError.message("所选文件夹必须同时包含 config.toml 和 auth.json")
+        }
+        return try saveConfigurationPair(
+            name: name,
+            kind: .imported,
+            configText: String(contentsOf: importedConfig, encoding: .utf8),
+            authText: String(contentsOf: importedAuth, encoding: .utf8)
+        )
+    }
+
+    func createRelayConfiguration(
+        name: String,
+        baseURL: String,
+        apiKey: String,
+        model: String,
+        reviewModel: String,
+        modelCatalogPath: String
+    ) throws -> CodexConfigurationProfile {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard !trimmedName.isEmpty, !trimmedURL.isEmpty, !apiKey.isEmpty, !model.isEmpty else {
+            throw ManagerError.message("请填写名称、URL、API Key 和模型")
+        }
+        guard let url = URL(string: trimmedURL), url.scheme == "https" || url.scheme == "http" else {
+            throw ManagerError.message("请输入有效的 http(s) API URL")
+        }
+        var text = (try? String(contentsOf: configURL, encoding: .utf8)) ?? ""
+        text = removingManagedBlock(from: text)
+        text = removingTable("model_providers.cmm_model_router", from: text)
+        text = settingTopLevel("model_provider", value: "OpenAI", in: text)
+        text = settingTopLevel("model", value: model, in: text)
+        text = settingTopLevel("review_model", value: reviewModel.isEmpty ? model : reviewModel, in: text)
+        text = settingTopLevelRaw("disable_response_storage", value: "true", in: text)
+        text = settingTopLevel("network_access", value: "enabled", in: text)
+        text = settingTopLevelRaw("windows_wsl_setup_acknowledged", value: "true", in: text)
+        if modelCatalogPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            text = removingTopLevel("model_catalog_json", in: text)
+        } else {
+            text = settingTopLevel("model_catalog_json", value: modelCatalogPath, in: text)
+        }
+        text = replacingTable("model_providers.OpenAI", in: text, with: [
+            "name = \"OpenAI\"",
+            "base_url = \"\(tomlEscape(trimmedURL))\"",
+            "wire_api = \"responses\"",
+            "requires_openai_auth = true"
+        ])
+        let authData = try JSONSerialization.data(
+            withJSONObject: ["OPENAI_API_KEY": apiKey],
+            options: [.prettyPrinted, .sortedKeys]
+        )
+        return try saveConfigurationPair(
+            name: trimmedName,
+            kind: .relay,
+            configText: text.trimmingCharacters(in: .whitespacesAndNewlines) + "\n",
+            authText: String(data: authData, encoding: .utf8) ?? "{}"
+        )
+    }
+
+    func switchConfiguration(to profile: CodexConfigurationProfile) throws {
+        let storedConfigURL = configurationProfilesDirectory.appendingPathComponent("\(profile.id).toml")
+        guard let storedAuth = KeychainStore.read(account: configurationProfileAuthAccount(profile.id)),
+              FileManager.default.fileExists(atPath: storedConfigURL.path) else {
+            throw ManagerError.message("配置方案内容或安全凭据不存在")
+        }
+        let storedConfig = try String(contentsOf: storedConfigURL, encoding: .utf8)
+        try validateConfigurationPair(configText: storedConfig, authText: storedAuth)
+        let previousConfig = (try? String(contentsOf: configURL, encoding: .utf8)) ?? ""
+        let previousAuth = (try? String(contentsOf: authURL, encoding: .utf8)) ?? "{}"
+        do {
+            try backup(previousConfig, label: "switch-config")
+            try KeychainStore.save(previousAuth, account: "configuration-switch-last-auth-backup")
+            try writeSensitive(storedConfig, to: configURL)
+            try writeSensitive(storedAuth, to: authURL)
+        } catch {
+            try? writeSensitive(previousConfig, to: configURL)
+            try? writeSensitive(previousAuth, to: authURL)
+            throw error
+        }
+    }
+
+    func deleteConfigurationProfile(_ profile: CodexConfigurationProfile) {
+        KeychainStore.delete(account: configurationProfileAuthAccount(profile.id))
+        try? FileManager.default.removeItem(
+            at: configurationProfilesDirectory.appendingPathComponent("\(profile.id).toml")
+        )
+    }
+
+    private func saveConfigurationPair(
+        name: String,
+        kind: CodexConfigurationKind,
+        configText: String,
+        authText: String
+    ) throws -> CodexConfigurationProfile {
+        try validateConfigurationPair(configText: configText, authText: authText)
+        let id = "cfg_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+        try FileManager.default.createDirectory(at: configurationProfilesDirectory, withIntermediateDirectories: true)
+        try writeSensitive(configText, to: configurationProfilesDirectory.appendingPathComponent("\(id).toml"))
+        try KeychainStore.save(authText, account: configurationProfileAuthAccount(id))
+        return CodexConfigurationProfile(
+            id: id,
+            name: name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "未命名配置" : name,
+            kind: kind,
+            model: topLevelValue("model", in: configText) ?? "未指定",
+            baseURL: tableValue("base_url", table: "model_providers.OpenAI", in: configText),
+            updatedAt: Date()
+        )
+    }
+
+    private func validateConfigurationPair(configText: String, authText: String) throws {
+        guard !configText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              topLevelValue("model", in: configText) != nil else {
+            throw ManagerError.message("config.toml 缺少 model")
+        }
+        guard let data = authText.data(using: .utf8),
+              (try? JSONSerialization.jsonObject(with: data)) is [String: Any] else {
+            throw ManagerError.message("auth.json 不是有效的 JSON 对象")
+        }
+    }
+
+    private func writeSensitive(_ text: String, to url: URL) throws {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try text.write(to: url, atomically: true, encoding: .utf8)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 
     func syncConfiguration(state: inout PersistedState) throws {
@@ -739,6 +929,22 @@ struct ConfigManager {
         return lines.joined(separator: "\n")
     }
 
+    private func settingTopLevelRaw(_ key: String, value: String, in text: String) -> String {
+        var lines = text.components(separatedBy: .newlines)
+        let rendered = "\(key) = \(value)"
+        let tableIndex = lines.firstIndex { $0.trimmingCharacters(in: .whitespaces).hasPrefix("[") }
+            ?? lines.count
+        for index in 0..<tableIndex {
+            let trimmed = lines[index].trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("\(key) ") || trimmed.hasPrefix("\(key)=") {
+                lines[index] = rendered
+                return lines.joined(separator: "\n")
+            }
+        }
+        lines.insert(rendered, at: tableIndex)
+        return lines.joined(separator: "\n")
+    }
+
     private func removingTopLevel(_ key: String, in text: String) -> String {
         var lines = text.components(separatedBy: .newlines)
         let tableIndex = lines.firstIndex { $0.trimmingCharacters(in: .whitespaces).hasPrefix("[") }
@@ -750,6 +956,40 @@ struct ConfigManager {
             }
         }
         return lines.joined(separator: "\n")
+    }
+
+    private func removingTable(_ table: String, from text: String) -> String {
+        var lines = text.components(separatedBy: .newlines)
+        guard let start = lines.firstIndex(where: { $0.trimmingCharacters(in: .whitespaces) == "[\(table)]" }) else {
+            return text
+        }
+        var end = start + 1
+        while end < lines.count {
+            if lines[end].trimmingCharacters(in: .whitespaces).hasPrefix("[") { break }
+            end += 1
+        }
+        lines.removeSubrange(start..<end)
+        return lines.joined(separator: "\n")
+    }
+
+    private func replacingTable(_ table: String, in text: String, with body: [String]) -> String {
+        let cleaned = removingTable(table, from: text).trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned + "\n\n[\(table)]\n" + body.joined(separator: "\n") + "\n"
+    }
+
+    private func tableValue(_ key: String, table: String, in text: String) -> String? {
+        let lines = text.components(separatedBy: .newlines)
+        guard let start = lines.firstIndex(where: { $0.trimmingCharacters(in: .whitespaces) == "[\(table)]" }) else {
+            return nil
+        }
+        for line in lines.dropFirst(start + 1) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("[") { break }
+            guard trimmed.hasPrefix("\(key) ") || trimmed.hasPrefix("\(key)=") else { continue }
+            guard let equal = trimmed.firstIndex(of: "=") else { continue }
+            return unquote(String(trimmed[trimmed.index(after: equal)...]).trimmingCharacters(in: .whitespaces))
+        }
+        return nil
     }
 
     private func writeActiveModelCatalog(for providers: [ModelProvider], preferredTemplate: String) throws {
@@ -1174,9 +1414,26 @@ final class ManagerStore: ObservableObject {
             // Materialize only the independent external profile. The user's main
             // config.toml is deliberately never rewritten by this application.
             try config.syncConfiguration(state: &state)
+            if state.configurationProfiles.isEmpty {
+                if let authText = try? String(contentsOf: codexHomeDirectory().appendingPathComponent("auth.json"), encoding: .utf8),
+                   let authObject = try? JSONSerialization.jsonObject(with: Data(authText.utf8)) as? [String: Any],
+                   let current = try? config.captureCurrentConfiguration(
+                        name: "当前配置备份",
+                        kind: authObject["auth_mode"] as? String == "chatgpt" ? .chatGPT : .imported
+                   ) {
+                    state.configurationProfiles.append(current)
+                    state.activeConfigurationProfileID = current.id
+                }
+                let legacyDirectory = codexHomeDirectory().appendingPathComponent("text", isDirectory: true)
+                if FileManager.default.fileExists(atPath: legacyDirectory.appendingPathComponent("config.toml").path),
+                   FileManager.default.fileExists(atPath: legacyDirectory.appendingPathComponent("auth.json").path),
+                   let imported = try? config.importConfigurationPair(name: "text 中转配置", directory: legacyDirectory) {
+                    state.configurationProfiles.append(imported)
+                }
+            }
             try config.saveState(state)
             selectedProviderID = state.providers.first?.id
-            message = "安全委派已启用；config.toml 保持只读"
+            message = "普通模型管理不改主配置；配置方案可成对切换 config.toml 与 auth.json"
         } catch {
             state = PersistedState()
             message = error.localizedDescription
@@ -1303,7 +1560,7 @@ final class ManagerStore: ObservableObject {
 
     func setConfigurationMode(_ mode: ConfigurationMode) {
         state.configurationMode = .desktopMenu
-        commit("已启用安全委派；config.toml 保持只读")
+        commit("已启用安全委派；只有配置方案的一键切换会替换主配置")
     }
 
     func openExternalProfile() {
@@ -1335,6 +1592,95 @@ final class ManagerStore: ObservableObject {
 
     var externalProfileCommand: String {
         config.externalProfileCommand
+    }
+
+    func captureCurrentConfiguration(name: String) {
+        do {
+            let authText = try String(contentsOf: codexHomeDirectory().appendingPathComponent("auth.json"), encoding: .utf8)
+            let authObject = try JSONSerialization.jsonObject(with: Data(authText.utf8)) as? [String: Any]
+            let kind: CodexConfigurationKind = authObject?["auth_mode"] as? String == "chatgpt" ? .chatGPT : .imported
+            let profile = try config.captureCurrentConfiguration(name: name, kind: kind)
+            state.configurationProfiles.append(profile)
+            state.activeConfigurationProfileID = profile.id
+            try config.saveState(state)
+            message = "已保存当前 config.toml 与 auth.json"
+        } catch {
+            message = error.localizedDescription
+            showingError = true
+        }
+    }
+
+    func createRelayConfiguration(
+        name: String,
+        baseURL: String,
+        apiKey: String,
+        model: String,
+        reviewModel: String,
+        modelCatalogPath: String
+    ) -> Bool {
+        do {
+            let profile = try config.createRelayConfiguration(
+                name: name,
+                baseURL: baseURL,
+                apiKey: apiKey,
+                model: model,
+                reviewModel: reviewModel,
+                modelCatalogPath: modelCatalogPath
+            )
+            state.configurationProfiles.append(profile)
+            try config.saveState(state)
+            message = "已保存中转配置；点击切换后生效"
+            return true
+        } catch {
+            message = error.localizedDescription
+            showingError = true
+            return false
+        }
+    }
+
+    func importConfigurationDirectory() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "导入"
+        guard panel.runModal() == .OK, let directory = panel.url else { return }
+        do {
+            let profile = try config.importConfigurationPair(name: directory.lastPathComponent + " 配置", directory: directory)
+            state.configurationProfiles.append(profile)
+            try config.saveState(state)
+            message = "已导入 \(profile.name)"
+        } catch {
+            message = error.localizedDescription
+            showingError = true
+        }
+    }
+
+    func switchConfiguration(_ profile: CodexConfigurationProfile) {
+        do {
+            try config.switchConfiguration(to: profile)
+            state.activeConfigurationProfileID = profile.id
+            try config.saveState(state)
+            message = "已切换到 \(profile.name)；完全退出并重新打开 Codex 后生效"
+        } catch {
+            message = error.localizedDescription
+            showingError = true
+        }
+    }
+
+    func deleteConfiguration(_ profile: CodexConfigurationProfile) {
+        config.deleteConfigurationProfile(profile)
+        state.configurationProfiles.removeAll { $0.id == profile.id }
+        if state.activeConfigurationProfileID == profile.id {
+            state.activeConfigurationProfileID = nil
+        }
+        do {
+            try config.saveState(state)
+            message = "已删除配置方案 \(profile.name)"
+        } catch {
+            message = error.localizedDescription
+            showingError = true
+        }
     }
 
     private func mutate(id: String, action: (inout ModelProvider) -> Void) {
@@ -1635,7 +1981,7 @@ struct ProviderDetail: View {
             .font(.caption)
             .foregroundStyle(.secondary)
 
-            Text("每个厂商只保留一个模型。外部模型保存在独立配置中；~/.codex/config.toml 始终只读。")
+            Text("每个厂商只保留一个模型。委派配置独立保存；只有在配置方案中点击一键切换才会替换主配置。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Spacer()
@@ -1843,11 +2189,115 @@ struct AntigravityPanel: View {
     }
 }
 
+struct ConfigurationProfilesPanel: View {
+    @ObservedObject var store: ManagerStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var snapshotName = "我的当前配置"
+    @State private var relayName = ""
+    @State private var relayURL = ""
+    @State private var relayKey = ""
+    @State private var relayModel = "gpt-5.5"
+    @State private var reviewModel = "gpt-5.5"
+    @State private var catalogPath = "~/.codex/codex-models.json"
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Codex 配置方案").font(.title2.weight(.semibold))
+                    Text("每个方案成对保存 config.toml 与 auth.json；密钥和登录令牌保存在系统钥匙串。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("完成") { dismiss() }
+            }
+
+            HSplitView {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        TextField("当前配置名称", text: $snapshotName)
+                        Button("保存当前") { store.captureCurrentConfiguration(name: snapshotName) }
+                    }
+                    Button("导入包含 config.toml 和 auth.json 的文件夹") {
+                        store.importConfigurationDirectory()
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    Divider()
+                    Text("已保存方案").font(.headline)
+                    List {
+                        ForEach(store.state.configurationProfiles) { profile in
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(profile.name).font(.headline)
+                                        Text("\(profile.kind.title) · \(profile.model)")
+                                            .font(.caption).foregroundStyle(.secondary)
+                                        if let url = profile.baseURL {
+                                            Text(url).font(.caption2.monospaced()).foregroundStyle(.secondary).lineLimit(1)
+                                        }
+                                    }
+                                    Spacer()
+                                    if store.state.activeConfigurationProfileID == profile.id {
+                                        Text("当前").font(.caption).foregroundStyle(.green)
+                                    }
+                                }
+                                HStack {
+                                    Button("一键切换") { store.switchConfiguration(profile) }
+                                        .buttonStyle(.borderedProminent)
+                                    Button("删除", role: .destructive) { store.deleteConfiguration(profile) }
+                                }
+                            }
+                            .padding(.vertical, 5)
+                        }
+                    }
+                }
+                .frame(minWidth: 330)
+
+                Form {
+                    Section("新建 API 中转配置") {
+                        TextField("方案名称", text: $relayName)
+                        TextField("API URL，例如 https://194834.xyz", text: $relayURL)
+                        SecureField("API Key", text: $relayKey)
+                        TextField("主模型", text: $relayModel)
+                        TextField("Review 模型", text: $reviewModel)
+                        TextField("模型目录路径（可选）", text: $catalogPath)
+                    }
+                    Section {
+                        Button("保存中转配置") {
+                            if store.createRelayConfiguration(
+                                name: relayName,
+                                baseURL: relayURL,
+                                apiKey: relayKey,
+                                model: relayModel,
+                                reviewModel: reviewModel,
+                                modelCatalogPath: catalogPath
+                            ) {
+                                relayKey = ""
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                    Section {
+                        Text("切换会先备份当前配置，再同时替换两份文件。Codex 在启动时读取配置，因此切换后需要完全退出并重新打开 Codex。")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                .formStyle(.grouped)
+                .frame(minWidth: 390)
+            }
+        }
+        .padding(18)
+        .frame(minWidth: 780, minHeight: 560)
+    }
+}
+
 struct ContentView: View {
     @StateObject private var store = ManagerStore()
     @State private var showingEditor = false
     @State private var editingProvider: ModelProvider?
     @State private var showingAntigravityPanel = false
+    @State private var showingConfigurationProfiles = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1860,6 +2310,7 @@ struct ContentView: View {
                         Text("当前 Codex 保留 GPT 与本地工具，外部模型只处理委派的子任务").font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
+                    Button("配置方案") { showingConfigurationProfiles = true }
                     Button("清除默认委派") { store.activateOpenAI() }
                         .disabled(store.state.activeProviderID == "openai")
                     Button {
@@ -1890,7 +2341,7 @@ struct ContentView: View {
                 HStack(spacing: 10) {
                     Label("安全委派", systemImage: "arrow.triangle.branch")
                         .font(.caption.weight(.semibold))
-                    Text("外部配置独立保存，config.toml 只读")
+                    Text("外部委派独立保存；主配置仅在点击一键切换时成对替换")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Spacer()
@@ -1963,7 +2414,7 @@ struct ContentView: View {
             HStack {
                 Text(store.message).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 Spacer()
-                Text("Keychain · 两份配置均自动备份").font(.caption2).foregroundStyle(.tertiary)
+                Text("Keychain · config.toml + auth.json 配置方案").font(.caption2).foregroundStyle(.tertiary)
             }
             .padding(.horizontal, 14)
             .frame(height: 30)
@@ -1978,6 +2429,9 @@ struct ContentView: View {
             AntigravityPanel(store: store)
                 .frame(minWidth: 620, minHeight: 500)
                 .padding(6)
+        }
+        .sheet(isPresented: $showingConfigurationProfiles) {
+            ConfigurationProfilesPanel(store: store)
         }
         .alert("操作失败", isPresented: $store.showingError) {
             Button("好", role: .cancel) {}
@@ -2005,6 +2459,8 @@ enum SelfTest {
         let dataURL = root.appendingPathComponent("data", isDirectory: true)
         try "model = \"gpt-test\"\n\n[features]\nweb_search = true\n"
             .write(to: configURL, atomically: true, encoding: .utf8)
+        try "{\"OPENAI_API_KEY\":\"original-test-key\"}\n"
+            .write(to: root.appendingPathComponent("auth.json"), atomically: true, encoding: .utf8)
         try FileManager.default.createDirectory(at: dataURL, withIntermediateDirectories: true)
         let catalogFixture: [String: Any] = [
             "models": [[
@@ -2134,6 +2590,30 @@ enum SelfTest {
         }
         try manager.saveState(state)
         _ = try manager.loadState()
+
+        let relayProfile = try manager.createRelayConfiguration(
+            name: "Relay Test",
+            baseURL: "https://relay.example.invalid/v1",
+            apiKey: "relay-test-key",
+            model: "relay-model",
+            reviewModel: "relay-review",
+            modelCatalogPath: "~/.codex/codex-models.json"
+        )
+        defer {
+            manager.deleteConfigurationProfile(relayProfile)
+            KeychainStore.delete(account: "configuration-switch-last-auth-backup")
+        }
+        try manager.switchConfiguration(to: relayProfile)
+        let switchedConfig = try String(contentsOf: configURL, encoding: .utf8)
+        let switchedAuth = try String(contentsOf: root.appendingPathComponent("auth.json"), encoding: .utf8)
+        guard switchedConfig.contains("model_provider = \"OpenAI\""),
+              switchedConfig.contains("model = \"relay-model\""),
+              switchedConfig.contains("review_model = \"relay-review\""),
+              switchedConfig.contains("base_url = \"https://relay.example.invalid/v1\""),
+              !switchedConfig.contains(modelRouterProviderID),
+              switchedAuth.contains("relay-test-key") else {
+            throw ManagerError.message("成对配置切换自检失败")
+        }
     }
 }
 

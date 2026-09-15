@@ -8,12 +8,16 @@ ChatGPT 账号创建的 Codex 任务会固定使用 OpenAI provider。把 `grok-
 
 本项目采用可稳定共存的方式：当前 Codex 始终保留 GPT 和本地文件、终端、浏览器等工具；它可以调用 `delegate_task`，把一个明确的文字子任务交给 Grok、Gemini、Claude、GPT-OSS 或 Antigravity，再检查和使用返回结果。
 
-## 配置隔离保证
+## 配置与账号方案
 
-- `~/.codex/config.toml` 始终只读，管理器不会添加、删除或改写其中任何字段。
+- 平常添加外部模型和调用 `delegate_task` 不会改动 `~/.codex/config.toml` 或 `auth.json`。
+- “配置方案”把完整 `config.toml` 和对应 `auth.json` 作为一组保存，兼容 ChatGPT 账号登录和 API Key 中转。
+- 点击“一键切换”时先备份当前配置，再成对替换；任一步失败都会回滚两份文件。
+- 可填写中转名称、URL、API Key、主模型、Review 模型和模型目录路径，也可导入同时包含两份文件的文件夹。
+- 切换后需要完全退出并重新打开 Codex，让 app-server 重新读取配置和认证。
 - 外部厂商、启用状态、默认委派模型写入 `~/.codex/model-manager/state.json`（Windows 为 `state.windows.json`）。
 - Responses 兼容厂商还会生成独立的 `~/.codex/config_out.config.toml`，供 `codex --profile config_out` 使用。
-- API Key 只保存在 macOS Keychain 或 Windows Credential Manager；MCP 委派进程首次解锁后只在内存中缓存。
+- 配置方案的 API Key、ChatGPT 登录令牌与外部厂商 Key 保存在 macOS Keychain 或 Windows Credential Manager。
 - Antigravity 登录完全由 `agy` 管理，不复制 Google 凭据。
 
 ## 功能

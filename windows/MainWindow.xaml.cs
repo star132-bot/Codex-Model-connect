@@ -41,6 +41,12 @@ public partial class MainWindow : Window
         Reload();
     }
 
+    private void OpenConfigurationProfiles(object sender, RoutedEventArgs e)
+    {
+        new ConfigurationProfilesWindow(manager) { Owner = this }.ShowDialog();
+        Reload();
+    }
+
     private void ClearEditor()
     {
         editing = null;

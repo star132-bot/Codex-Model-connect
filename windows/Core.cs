@@ -36,6 +36,18 @@ public sealed class WindowsState
     public string ConfigurationMode { get; set; } = "desktopMenu";
     public string? ExternalProviderId { get; set; }
     public string? RouterSecret { get; set; }
+    public List<ConfigurationProfileRecord> ConfigurationProfiles { get; set; } = [];
+    public string? ActiveConfigurationProfileId { get; set; }
+}
+
+public sealed class ConfigurationProfileRecord
+{
+    public string Id { get; set; } = "";
+    public string Name { get; set; } = "";
+    public string Kind { get; set; } = "imported";
+    public string Model { get; set; } = "";
+    public string? BaseUrl { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
 }
 
 internal static class Paths
@@ -45,7 +57,9 @@ internal static class Paths
     public static readonly string State = Path.Combine(Data, "state.windows.json");
     public static readonly string RouterState = Path.Combine(Data, "router-state.windows.json");
     public static readonly string Config = Path.Combine(CodexHome, "config.toml");
+    public static readonly string Auth = Path.Combine(CodexHome, "auth.json");
     public static readonly string Profile = Path.Combine(CodexHome, "config_out.config.toml");
+    public static readonly string ConfigurationProfiles = Path.Combine(Data, "configuration-profiles");
     public static readonly string BaseCatalog = Path.Combine(Data, "base-model-catalog.windows.json");
     public static readonly string ActiveCatalog = Path.Combine(Data, "active-model-catalog.windows.json");
     public static readonly string ExternalCatalog = Path.Combine(Data, "external-model-catalog.windows.json");
@@ -115,6 +129,32 @@ public static class CredentialStore
         using var output = Console.OpenStandardOutput();
         output.Write(bytes, 0, bytes.Length);
         return true;
+    }
+
+    public static void SaveLarge(string account, string value)
+    {
+        DeleteLarge(account);
+        const int chunkCharacters = 1500;
+        var chunks = Enumerable.Range(0, (value.Length + chunkCharacters - 1) / chunkCharacters)
+            .Select(index => value.Substring(index * chunkCharacters, Math.Min(chunkCharacters, value.Length - index * chunkCharacters))).ToList();
+        Save(account + "/chunks", chunks.Count.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        for (var index = 0; index < chunks.Count; index++) Save(account + "/" + index, chunks[index]);
+    }
+
+    public static string? ReadLarge(string account)
+    {
+        if (!int.TryParse(Read(account + "/chunks"), out var count) || count < 0 || count > 100) return null;
+        var result = new StringBuilder();
+        for (var index = 0; index < count; index++) {
+            var chunk = Read(account + "/" + index); if (chunk is null) return null; result.Append(chunk);
+        }
+        return result.ToString();
+    }
+
+    public static void DeleteLarge(string account)
+    {
+        if (int.TryParse(Read(account + "/chunks"), out var count)) for (var index = 0; index < count; index++) Delete(account + "/" + index);
+        Delete(account + "/chunks");
     }
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
@@ -199,6 +239,11 @@ public sealed class ManagerService
     {
         Directory.CreateDirectory(Paths.Data);
         State = File.Exists(Paths.State) ? JsonSerializer.Deserialize<WindowsState>(File.ReadAllText(Paths.State), JsonOptions()) ?? new() : new();
+        if (State.ConfigurationProfiles.Count == 0 && File.Exists(Paths.Config) && File.Exists(Paths.Auth)) {
+            var auth = File.ReadAllText(Paths.Auth); var kind = auth.Contains("\"auth_mode\"", StringComparison.Ordinal) && auth.Contains("\"chatgpt\"", StringComparison.Ordinal) ? "chatGPT" : "imported";
+            var current = SaveConfigurationPair("当前配置备份", kind, File.ReadAllText(Paths.Config), auth);
+            State.ConfigurationProfiles.Add(current); State.ActiveConfigurationProfileId = current.Id; Save();
+        }
     }
 
     public void Upsert(ProviderRecord provider, string key, bool makeDefault)
@@ -234,6 +279,71 @@ public sealed class ManagerService
     }
     public void UseGpt() { State.ActiveProviderId = "openai"; State.ActiveModel = State.OpenAIModel; Sync(); }
     public void SetMode(string mode) { State.ConfigurationMode = "desktopMenu"; Sync(); }
+
+    public ConfigurationProfileRecord CaptureCurrentConfiguration(string name)
+    {
+        if (!File.Exists(Paths.Config) || !File.Exists(Paths.Auth)) throw new InvalidOperationException("当前 config.toml 或 auth.json 不存在");
+        var auth = File.ReadAllText(Paths.Auth); var kind = auth.Contains("\"auth_mode\"", StringComparison.Ordinal) && auth.Contains("\"chatgpt\"", StringComparison.Ordinal) ? "chatGPT" : "imported";
+        var profile = SaveConfigurationPair(name, kind, File.ReadAllText(Paths.Config), auth); State.ConfigurationProfiles.Add(profile); State.ActiveConfigurationProfileId = profile.Id; Save(); return profile;
+    }
+
+    public ConfigurationProfileRecord ImportConfiguration(string name, string directory)
+    {
+        var config = Path.Combine(directory, "config.toml"); var auth = Path.Combine(directory, "auth.json");
+        if (!File.Exists(config) || !File.Exists(auth)) throw new InvalidOperationException("所选文件夹必须同时包含 config.toml 和 auth.json");
+        var profile = SaveConfigurationPair(name, "imported", File.ReadAllText(config), File.ReadAllText(auth)); State.ConfigurationProfiles.Add(profile); Save(); return profile;
+    }
+
+    public ConfigurationProfileRecord CreateRelayConfiguration(string name, string baseUrl, string apiKey, string model, string reviewModel, string catalogPath)
+    {
+        name = name.Trim(); baseUrl = baseUrl.Trim().TrimEnd('/'); model = model.Trim(); reviewModel = reviewModel.Trim();
+        if (name.Length == 0 || apiKey.Length == 0 || model.Length == 0 || !Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri) || (uri.Scheme != "https" && uri.Scheme != "http"))
+            throw new InvalidOperationException("请填写有效的名称、URL、API Key 和模型");
+        var text = File.Exists(Paths.Config) ? File.ReadAllText(Paths.Config) : "";
+        text = Toml.RemoveBlock(text, "# >>> codex-model-manager:providers", "# <<< codex-model-manager:providers");
+        text = Toml.RemoveTable(text, "model_providers.cmm_model_router");
+        text = Toml.SetTop(text, "model_provider", "OpenAI"); text = Toml.SetTop(text, "model", model); text = Toml.SetTop(text, "review_model", reviewModel.Length == 0 ? model : reviewModel);
+        text = Toml.SetTopRaw(text, "disable_response_storage", "true"); text = Toml.SetTop(text, "network_access", "enabled"); text = Toml.SetTopRaw(text, "windows_wsl_setup_acknowledged", "true");
+        text = string.IsNullOrWhiteSpace(catalogPath) ? Toml.RemoveTop(text, "model_catalog_json") : Toml.SetTop(text, "model_catalog_json", catalogPath.Trim());
+        text = Toml.ReplaceTable(text, "model_providers.OpenAI", [$"name = \"OpenAI\"", $"base_url = \"{Toml.Escape(baseUrl)}\"", "wire_api = \"responses\"", "requires_openai_auth = true"]);
+        var auth = JsonSerializer.Serialize(new Dictionary<string, string> { ["OPENAI_API_KEY"] = apiKey }, JsonOptions());
+        var profile = SaveConfigurationPair(name, "relay", text.TrimEnd() + "\n", auth); State.ConfigurationProfiles.Add(profile); Save(); return profile;
+    }
+
+    public void SwitchConfiguration(ConfigurationProfileRecord profile)
+    {
+        var storedConfig = Path.Combine(Paths.ConfigurationProfiles, profile.Id + ".toml"); var account = "configuration-profile-auth-" + profile.Id;
+        var storedAuth = CredentialStore.ReadLarge(account) ?? throw new InvalidOperationException("配置方案安全凭据不存在");
+        if (!File.Exists(storedConfig)) throw new InvalidOperationException("配置方案文件不存在");
+        var configText = File.ReadAllText(storedConfig); ValidateConfigurationPair(configText, storedAuth);
+        var oldConfig = File.Exists(Paths.Config) ? File.ReadAllText(Paths.Config) : ""; var oldAuth = File.Exists(Paths.Auth) ? File.ReadAllText(Paths.Auth) : "{}";
+        try {
+            Directory.CreateDirectory(Path.Combine(Paths.Data, "backups"));
+            AtomicWrite(Path.Combine(Paths.Data, "backups", $"switch-config-{DateTimeOffset.Now:yyyyMMdd-HHmmss-fff}.toml"), oldConfig);
+            CredentialStore.SaveLarge("configuration-switch-last-auth-backup", oldAuth);
+            AtomicWrite(Paths.Config, configText); AtomicWrite(Paths.Auth, storedAuth);
+        } catch { try { AtomicWrite(Paths.Config, oldConfig); AtomicWrite(Paths.Auth, oldAuth); } catch { } throw; }
+        State.ActiveConfigurationProfileId = profile.Id; Save();
+    }
+
+    public void DeleteConfiguration(ConfigurationProfileRecord profile)
+    {
+        CredentialStore.DeleteLarge("configuration-profile-auth-" + profile.Id); var file = Path.Combine(Paths.ConfigurationProfiles, profile.Id + ".toml"); if (File.Exists(file)) File.Delete(file);
+        State.ConfigurationProfiles.RemoveAll(item => item.Id == profile.Id); if (State.ActiveConfigurationProfileId == profile.Id) State.ActiveConfigurationProfileId = null; Save();
+    }
+
+    private ConfigurationProfileRecord SaveConfigurationPair(string name, string kind, string configText, string authText)
+    {
+        ValidateConfigurationPair(configText, authText); Directory.CreateDirectory(Paths.ConfigurationProfiles); var id = "cfg_" + Guid.NewGuid().ToString("N");
+        AtomicWrite(Path.Combine(Paths.ConfigurationProfiles, id + ".toml"), configText); CredentialStore.SaveLarge("configuration-profile-auth-" + id, authText);
+        return new ConfigurationProfileRecord { Id = id, Name = string.IsNullOrWhiteSpace(name) ? "未命名配置" : name.Trim(), Kind = kind, Model = Toml.GetTop(configText, "model") ?? "未指定", BaseUrl = Toml.GetTable(configText, "model_providers.OpenAI", "base_url") };
+    }
+
+    private static void ValidateConfigurationPair(string configText, string authText)
+    {
+        if (string.IsNullOrWhiteSpace(configText) || Toml.GetTop(configText, "model") is null) throw new InvalidOperationException("config.toml 缺少 model");
+        try { if (JsonNode.Parse(authText) is not JsonObject) throw new Exception(); } catch { throw new InvalidOperationException("auth.json 不是有效的 JSON 对象"); }
+    }
 
     private void Sync()
     {
@@ -331,6 +441,24 @@ internal static class Toml
         var lines = text.Replace("\r", "").Split('\n').ToList(); var table = lines.FindIndex(x => x.TrimStart().StartsWith('[')); if (table < 0) table = lines.Count;
         for (var i = table - 1; i >= 0; i--) { var t = lines[i].Trim(); if (t.StartsWith(key + " ") || t.StartsWith(key + "=")) lines.RemoveAt(i); }
         return string.Join('\n', lines);
+    }
+    public static string SetTopRaw(string text, string key, string value)
+    {
+        var lines = text.Replace("\r", "").Split('\n').ToList(); var table = lines.FindIndex(x => x.TrimStart().StartsWith('[')); if (table < 0) table = lines.Count;
+        for (var i = 0; i < table; i++) { var t = lines[i].Trim(); if (t.StartsWith(key + " ") || t.StartsWith(key + "=")) { lines[i] = $"{key} = {value}"; return string.Join('\n', lines); } }
+        lines.Insert(table, $"{key} = {value}"); return string.Join('\n', lines);
+    }
+    public static string RemoveTable(string text, string table)
+    {
+        var lines = text.Replace("\r", "").Split('\n').ToList(); var start = lines.FindIndex(x => x.Trim() == $"[{table}]"); if (start < 0) return text;
+        var end = start + 1; while (end < lines.Count && !lines[end].TrimStart().StartsWith('[')) end++; lines.RemoveRange(start, end - start); return string.Join('\n', lines);
+    }
+    public static string ReplaceTable(string text, string table, IEnumerable<string> body) => RemoveTable(text, table).TrimEnd() + $"\n\n[{table}]\n" + string.Join('\n', body) + "\n";
+    public static string? GetTable(string text, string table, string key)
+    {
+        var lines = text.Replace("\r", "").Split('\n'); var start = Array.FindIndex(lines, x => x.Trim() == $"[{table}]"); if (start < 0) return null;
+        for (var i = start + 1; i < lines.Length && !lines[i].TrimStart().StartsWith('['); i++) { var t = lines[i].Trim(); if (t.StartsWith(key + " ") || t.StartsWith(key + "=")) return t[(t.IndexOf('=') + 1)..].Trim().Trim('"'); }
+        return null;
     }
     public static string RemoveBlock(string text, string start, string end)
     {
