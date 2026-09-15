@@ -26,7 +26,7 @@ public sealed class AntigravityWindow : Window
         actions.Children.Add(Button("刷新模型", async (_, _) => await Detect())); actions.Children.Add(Button("查询额度", async (_, _) => await Usage()));
         root.Children.Add(actions); root.Children.Add(new TextBlock { Text = "可用模型", FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 15, 0, 8) });
         root.Children.Add(new ScrollViewer { Content = models, Height = 245, VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
-        root.Children.Add(Button("测试并导入 Codex", async (_, _) => await Import())); root.Children.Add(output); Content = root;
+        root.Children.Add(Button("测试并加入委派", async (_, _) => await Import())); root.Children.Add(output); Content = root;
         Loaded += async (_, _) => await Detect();
     }
 
@@ -60,7 +60,7 @@ public sealed class AntigravityWindow : Window
             var selected = Checks.Where(c => c.IsChecked == true).Select(c => (string)c.Tag).ToList(); if (selected.Count == 0) throw new InvalidOperationException("请至少选择一个模型");
             var passed = new List<string>(); var report = new StringBuilder();
             foreach (var model in selected) { var result = await AgyService.RunAsync(["-p", "Reply with OK only.", "--model", model, "--output-format", "json", "--print-timeout", "30s"]); report.AppendLine($"{model}: {(result.ExitCode == 0 ? "通过" : "失败")}"); if (result.ExitCode == 0) passed.Add(model); }
-            if (passed.Count == 0) throw new InvalidOperationException("选中模型均未通过测试"); manager.ImportAntigravity(passed); output.Text = report + $"\n已导入 {passed.Count} 个模型；完全重启 Codex Desktop 后新建任务使用。";
+            if (passed.Count == 0) throw new InvalidOperationException("选中模型均未通过测试"); manager.ImportAntigravity(passed); output.Text = report + $"\n已将 {passed.Count} 个模型加入 delegate_task 委派列表；config.toml 未修改。";
         });
     }
     private async Task Busy(Func<Task> work) { IsEnabled = false; try { await work(); } catch (Exception ex) { output.Text = ex.Message; MessageBox.Show(ex.Message, "Antigravity", MessageBoxButton.OK, MessageBoxImage.Error); } finally { IsEnabled = true; } }

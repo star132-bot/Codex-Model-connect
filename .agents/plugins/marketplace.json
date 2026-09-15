@@ -1,0 +1,20 @@
+{
+  "name": "codex-model-connect",
+  "owner": {
+    "name": "star132-bot"
+  },
+  "plugins": [
+    {
+      "name": "codex-model-manager",
+      "source": {
+        "source": "local",
+        "path": "."
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

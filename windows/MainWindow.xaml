@@ -16,14 +16,11 @@
         <Grid.ColumnDefinitions><ColumnDefinition /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
         <StackPanel>
           <TextBlock x:Name="ActiveTitle" FontSize="20" FontWeight="SemiBold" />
-          <TextBlock Text="Windows Credential Manager 保存密钥；本地 GPT 与外部模型分离" Foreground="#777" Margin="0,3,0,0" />
+          <TextBlock Text="当前 Codex 保留 GPT 与本地工具；外部模型只处理委派的子任务" Foreground="#777" Margin="0,3,0,0" />
         </StackPanel>
         <StackPanel Grid.Column="1" Orientation="Horizontal">
-          <ComboBox x:Name="ModeBox" Width="150" SelectionChanged="ModeChanged">
-            <ComboBoxItem Content="隔离配置" Tag="isolatedProfile" />
-            <ComboBoxItem Content="桌面菜单兼容" Tag="desktopMenu" />
-          </ComboBox>
-          <Button Content="新任务使用 GPT" Click="UseGpt" />
+          <Border Background="#E8F2FF" CornerRadius="7" Padding="12,7" Margin="4"><TextBlock Text="安全委派 · config.toml 只读" Foreground="#075DB7" /></Border>
+          <Button Content="清除默认委派" Click="UseGpt" />
           <Button Content="Antigravity 账号" Click="OpenAntigravity" />
           <Button Content="＋ 添加厂商" Click="AddProvider" Background="#0A7AFF" Foreground="White" />
         </StackPanel>
@@ -48,9 +45,9 @@
           <TextBox x:Name="UrlBox" ToolTip="例如 https://api.example.com/v1" />
           <TextBlock Text="协议类型" />
           <ComboBox x:Name="ProtocolBox" SelectionChanged="ProtocolChanged">
-            <ComboBoxItem Content="OpenAI Responses（可导入 Codex）" Tag="responses" />
-            <ComboBoxItem Content="OpenAI Chat Completions（仅测试）" Tag="chatCompletions" />
-            <ComboBoxItem Content="Gemini generateContent（仅测试）" Tag="gemini" />
+            <ComboBoxItem Content="OpenAI Responses（可委派 / config_out）" Tag="responses" />
+            <ComboBoxItem Content="OpenAI Chat Completions（可委派）" Tag="chatCompletions" />
+            <ComboBoxItem Content="Gemini generateContent（可委派）" Tag="gemini" />
           </ComboBox>
           <TextBlock Text="API Key（留空保留已保存密钥）" />
           <PasswordBox x:Name="KeyBox" Padding="8,6" Margin="0,3,0,8" />
@@ -61,13 +58,13 @@
           <TextBlock Text="模型（每个厂商保留一个）" />
           <ComboBox x:Name="ModelBox" IsEditable="True" />
           <CheckBox x:Name="EnabledBox" Content="启用这个厂商和模型" IsChecked="True" Margin="0,8" />
-          <CheckBox x:Name="DefaultBox" Content="保存后设为新任务默认模型" IsChecked="True" Margin="0,5,0,14" />
+          <CheckBox x:Name="DefaultBox" Content="保存后设为默认委派模型" IsChecked="True" Margin="0,5,0,14" />
           <StackPanel Orientation="Horizontal">
-            <Button x:Name="SaveButton" Content="测试、保存并导入 Codex" Click="SaveProvider" Background="#0A7AFF" Foreground="White" />
+            <Button x:Name="SaveButton" Content="测试、保存并加入委派" Click="SaveProvider" Background="#0A7AFF" Foreground="White" />
             <Button x:Name="DeleteButton" Content="删除" Click="DeleteProvider" Foreground="#C62828" Visibility="Collapsed" />
           </StackPanel>
           <Border Background="#FFF7E8" CornerRadius="8" Padding="12" Margin="0,18,0,0">
-            <TextBlock TextWrapping="Wrap" Foreground="#8A5A00">Responses 协议可直接导入 Codex。切换模型后请完全重启 Codex Desktop，新建任务并在第一条消息前选择模型。</TextBlock>
+            <TextBlock TextWrapping="Wrap" Foreground="#8A5A00">外部模型保存在独立配置中，~/.codex/config.toml 始终只读。Codex 通过 delegate_task 委派文字任务，本地工具仍由当前 GPT 任务执行。</TextBlock>
           </Border>
         </StackPanel>
       </ScrollViewer>

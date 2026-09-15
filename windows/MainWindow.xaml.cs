@@ -29,7 +29,6 @@ public partial class MainWindow : Window
             };
             ProviderList.Items.Add(item);
         }
-        ModeBox.SelectedIndex = manager.State.ConfigurationMode == "desktopMenu" ? 1 : 0;
         ActiveTitle.Text = manager.ActiveTitle;
         loading = false;
     }
@@ -92,9 +91,7 @@ public partial class MainWindow : Window
             record.DisplayName = model; record.Enabled = EnabledBox.IsChecked == true; record.VerifiedAt = DateTimeOffset.UtcNow;
             manager.Upsert(record, key, DefaultBox.IsChecked == true);
             editing = record; Reload();
-            StatusText.Text = Protocol == "responses"
-                ? "API 已验证并导入 Codex；完全重启 Desktop 后新建任务使用"
-                : "API 已验证并保存；该协议不能作为 Codex 主模型";
+            StatusText.Text = "API 已验证并加入委派列表；config.toml 未修改";
         });
     }
 
@@ -115,20 +112,13 @@ public partial class MainWindow : Window
 
     private void UseGpt(object sender, RoutedEventArgs e)
     {
-        try { manager.UseGpt(); Reload(); StatusText.Text = "已将本地 GPT 设为新任务默认"; }
-        catch (Exception ex) { ShowError(ex); }
-    }
-
-    private void ModeChanged(object sender, SelectionChangedEventArgs e)
-    {
-        if (loading || ModeBox.SelectedItem is not ComboBoxItem item) return;
-        try { manager.SetMode(item.Tag?.ToString() ?? "isolatedProfile"); Reload(); StatusText.Text = "配置模式已更新"; }
+        try { manager.UseGpt(); Reload(); StatusText.Text = "已清除默认委派；本地 GPT 配置未修改"; }
         catch (Exception ex) { ShowError(ex); }
     }
 
     private void ProtocolChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (SaveButton is not null) SaveButton.Content = Protocol == "responses" ? "测试、保存并导入 Codex" : "测试并保存";
+        if (SaveButton is not null) SaveButton.Content = "测试、保存并加入委派";
     }
 
     private async Task Busy(Func<Task> work)

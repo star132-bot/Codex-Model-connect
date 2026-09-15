@@ -36,16 +36,16 @@ enum ConfigurationMode: String, Codable, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .isolatedProfile: return "隔离配置"
-        case .desktopMenu: return "桌面菜单兼容"
+        case .desktopMenu: return "安全委派"
         }
     }
 
     var description: String {
         switch self {
         case .isolatedProfile:
-            return "本地 GPT 保持在 config.toml；外部模型写入 config_out 配置。"
+            return "外部模型保存在 config_out 和模型管理器目录。"
         case .desktopMenu:
-            return "外部模型会和 GPT 出现在新任务菜单；已有任务保留创建时的厂商。"
+            return "Codex 保留本地工具，通过 delegate_task 把子任务交给外部模型。"
         }
     }
 }
@@ -67,9 +67,7 @@ enum ProviderWireProtocol: String, Codable, CaseIterable, Identifiable {
 
     var codexCompatible: Bool { self == .responses }
 
-    var note: String {
-        codexCompatible ? "可导入 Codex" : "仅测试；Codex 当前不能直接导入"
-    }
+    var note: String { codexCompatible ? "可委派 · 可用于 config_out" : "可委派" }
 }
 
 struct ManagedModel: Codable, Equatable {
@@ -263,7 +261,7 @@ struct ModelProvider: Codable, Identifiable, Equatable {
     var verifiedAt: Date?
 
     var canActivate: Bool {
-        enabled && model.enabled && verifiedAt != nil && wireProtocol.codexCompatible
+        enabled && model.enabled && verifiedAt != nil
     }
 
     var isAntigravityBridge: Bool {
@@ -521,9 +519,6 @@ struct ConfigManager {
             }
         }
 
-        if try migrateLegacyConfiguration(state: &state) {
-            stateChanged = true
-        }
         if stateChanged {
             try saveState(state)
         }
@@ -552,15 +547,8 @@ struct ConfigManager {
     }
 
     func syncConfiguration(state: inout PersistedState) throws {
-        _ = try migrateLegacyConfiguration(state: &state)
         let importable = state.providers.filter { $0.canActivate }
-        let profileImportable = importable.filter { !$0.isAntigravityBridge }
-        if state.configurationMode == .isolatedProfile,
-           let active = importable.first(where: { $0.id == state.activeProviderID }),
-           active.isAntigravityBridge {
-            state.activeProviderID = "openai"
-            state.activeModel = state.openAIModel
-        }
+        let profileImportable = importable.filter { !$0.isAntigravityBridge && $0.wireProtocol.codexCompatible }
         if state.activeProviderID != "openai",
            !importable.contains(where: { $0.id == state.activeProviderID }) {
             state.activeProviderID = "openai"
@@ -578,12 +566,11 @@ struct ConfigManager {
         // third-party provider settings and is safe to use from `codex --profile config_out`.
         try syncExternalProfile(state: &state, importable: profileImportable)
 
-        switch state.configurationMode {
-        case .isolatedProfile:
-            try removeDesktopBridge(state: &state)
-        case .desktopMenu:
-            try syncDesktopMenu(state: &state, importable: importable)
-        }
+        // config.toml belongs to the user and is deliberately read-only. All
+        // external providers live in config_out and model-manager state; the
+        // plugin's MCP delegate calls them without replacing the task provider.
+        state.configurationMode = .desktopMenu
+        state.routerSecret = nil
     }
 
     private func backup(_ text: String, label: String) throws {
@@ -611,66 +598,6 @@ struct ConfigManager {
         return text.contains(managedBlockStart)
             || provider == modelRouterProviderID
             || catalog == legacyCatalog
-    }
-
-    /// Remove the old implementation's router settings from the base config. This is
-    /// intentionally idempotent so an upgrade cannot leave GPT pointed at a dead router.
-    @discardableResult
-    private func migrateLegacyConfiguration(state: inout PersistedState) throws -> Bool {
-        let oldText = (try? String(contentsOf: configURL, encoding: .utf8)) ?? ""
-        let configuredProvider = topLevelValue("model_provider", in: oldText) ?? "openai"
-        let configuredCatalog = topLevelValue("model_catalog_json", in: oldText)
-        let legacyCatalog = dataDirectory.appendingPathComponent("active-model-catalog.json").path
-        let hasLegacy = oldText.contains(managedBlockStart)
-            || configuredProvider == modelRouterProviderID
-            || configuredCatalog == legacyCatalog
-
-        // The current desktop compatibility mode deliberately uses the same
-        // marker as the original bridge.  Keep it intact when the persisted
-        // state says that this is an active, current bridge; otherwise merely
-        // reopening the panel would migrate it back to isolated mode.
-        let currentDesktopBridge = state.configurationMode == .desktopMenu
-            && configuredProvider == modelRouterProviderID
-            && oldText.contains("# Only the local bridge lives in config.toml")
-        if currentDesktopBridge {
-            return false
-        }
-
-        let hasStaleRuntime = managesRuntime &&
-            (FileManager.default.fileExists(atPath: launchAgentURL.path)
-             || state.previousNoProxyCaptured == true)
-
-        guard hasLegacy || hasStaleRuntime else { return false }
-
-        var text = removingManagedBlock(from: oldText)
-        if configuredProvider == modelRouterProviderID {
-            text = removingTopLevel("model_provider", in: text)
-            let localModel = state.openAIModel.isEmpty ? "gpt-5.6-sol" : state.openAIModel
-            text = settingTopLevel("model", value: localModel, in: text)
-        }
-        if configuredCatalog == legacyCatalog {
-            if let previous = state.previousModelCatalogPath, !previous.isEmpty {
-                text = settingTopLevel("model_catalog_json", value: previous, in: text)
-            } else {
-                text = removingTopLevel("model_catalog_json", in: text)
-            }
-            state.previousModelCatalogPath = nil
-        }
-
-        if text != oldText {
-            try writeConfig(text, to: configURL, backupLabel: "config")
-        }
-        if hasLegacy {
-            state.configurationMode = .isolatedProfile
-            state.routerSecret = nil
-            state.activeProviderID = "openai"
-            state.activeModel = state.openAIModel
-        }
-        if managesRuntime {
-            stopRouterLaunchAgent()
-            restoreNoProxy(state: &state)
-        }
-        return text != oldText || hasLegacy || hasStaleRuntime
     }
 
     private func selectedExternalProvider(
@@ -760,68 +687,6 @@ struct ConfigManager {
             to: dataDirectory.appendingPathComponent("external-model-catalog.json"),
             options: .atomic
         )
-    }
-
-    private func syncDesktopMenu(state: inout PersistedState, importable: [ModelProvider]) throws {
-        let oldText = (try? String(contentsOf: configURL, encoding: .utf8)) ?? ""
-        var text = removingManagedBlock(from: oldText)
-        let selected = importable.first(where: { $0.id == state.activeProviderID })
-        let catalogPath = dataDirectory.appendingPathComponent("active-model-catalog.json").path
-        if importable.isEmpty {
-            text = settingTopLevel("model", value: state.openAIModel, in: text)
-            text = removingTopLevel("model_provider", in: text)
-            text = removingTopLevel("model_catalog_json", in: text)
-            state.routerSecret = nil
-            if managesRuntime {
-                stopRouterLaunchAgent()
-                restoreNoProxy(state: &state)
-            }
-        } else {
-            let activeModel = selected?.model.id ?? state.openAIModel
-            text = settingTopLevel("model", value: activeModel, in: text)
-            text = settingTopLevel("model_provider", value: modelRouterProviderID, in: text)
-            text = settingTopLevel("model_catalog_json", value: catalogPath, in: text)
-            if state.routerSecret?.isEmpty != false {
-                state.routerSecret = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
-            }
-            try writeActiveModelCatalog(for: importable, preferredTemplate: state.openAIModel)
-            try writeRouterState(state)
-            if managesRuntime {
-                let runtimeExecutable = try ensureRuntimeInstalled()
-                try configureNoProxy(state: &state)
-                try installRouterLaunchAgent(executable: runtimeExecutable)
-            }
-            let block = renderRouterManagedBlock(routerSecret: state.routerSecret)
-            text = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            text += "\n\n" + block + "\n"
-        }
-        try writeConfigIfChanged(text, oldText: oldText, to: configURL, backupLabel: "config")
-    }
-
-    private func removeDesktopBridge(state: inout PersistedState) throws {
-        let oldText = (try? String(contentsOf: configURL, encoding: .utf8)) ?? ""
-        let configuredProvider = topLevelValue("model_provider", in: oldText)
-        let configuredCatalog = topLevelValue("model_catalog_json", in: oldText)
-        var text = removingManagedBlock(from: oldText)
-        if configuredProvider == modelRouterProviderID {
-            text = removingTopLevel("model_provider", in: text)
-            text = settingTopLevel("model", value: state.openAIModel, in: text)
-        }
-        if configuredCatalog == dataDirectory.appendingPathComponent("active-model-catalog.json").path {
-            text = removingTopLevel("model_catalog_json", in: text)
-        }
-        try writeConfigIfChanged(text, oldText: oldText, to: configURL, backupLabel: "config")
-        if managesRuntime {
-            stopRouterLaunchAgent()
-            restoreNoProxy(state: &state)
-        }
-        clearRouterState()
-        state.routerSecret = nil
-    }
-
-    private func clearRouterState() {
-        let url = dataDirectory.appendingPathComponent("router-state.json")
-        try? FileManager.default.removeItem(at: url)
     }
 
     private func writeConfigIfChanged(_ text: String, oldText: String, to url: URL, backupLabel: String) throws {
@@ -1306,14 +1171,12 @@ final class ManagerStore: ObservableObject {
     init() {
         do {
             state = try config.loadState()
-            // Materialize the profile and clean up any legacy router settings as soon
-            // as the panel opens, so an upgrade is complete even before the first click.
+            // Materialize only the independent external profile. The user's main
+            // config.toml is deliberately never rewritten by this application.
             try config.syncConfiguration(state: &state)
             try config.saveState(state)
             selectedProviderID = state.providers.first?.id
-            if state.configurationMode == .desktopMenu {
-                message = "桌面兼容已启用；完全重启 Codex Desktop 后新建任务使用"
-            }
+            message = "安全委派已启用；config.toml 保持只读"
         } catch {
             state = PersistedState()
             message = error.localizedDescription
@@ -1333,8 +1196,7 @@ final class ManagerStore: ObservableObject {
         guard let provider = state.providers.first(where: { $0.id == state.activeProviderID }) else {
             return "本地 GPT · \(state.openAIModel)"
         }
-        let prefix = state.configurationMode == .desktopMenu ? "桌面新任务" : "外部 config_out"
-        return "\(prefix) · \(provider.name) · \(provider.model.displayName)"
+        return "默认委派 · \(provider.name) · \(provider.model.displayName)"
     }
 
     func upsert(_ provider: ModelProvider, apiKey: String, activateAfterSave: Bool) throws {
@@ -1353,16 +1215,10 @@ final class ManagerStore: ObservableObject {
             }
         }
         try persistAndSync()
-        if provider.wireProtocol.codexCompatible && state.activeProviderID == provider.id {
-            message = state.configurationMode == .isolatedProfile
-                ? "已添加 \(provider.model.id) 并写入 config_out；运行 \(config.externalProfileCommand) 使用"
-                : "已添加 \(provider.model.id) 并设为新任务默认；重启 Codex 后新建任务使用"
-        } else if provider.wireProtocol.codexCompatible {
-            message = state.configurationMode == .isolatedProfile
-                ? "已添加 \(provider.model.id) 到 config_out；本地 GPT 配置未改动"
-                : "已添加 \(provider.model.id)；重启 Codex 后可在新任务中选择"
+        if state.activeProviderID == provider.id {
+            message = "已添加 \(provider.model.id) 并设为默认委派模型"
         } else {
-            message = "验证成功；该协议仅保存，不导入 Codex"
+            message = "已添加 \(provider.model.id)；可通过 delegate_task 委派"
         }
     }
 
@@ -1377,9 +1233,7 @@ final class ManagerStore: ObservableObject {
     func activateOpenAI() {
         state.activeProviderID = "openai"
         state.activeModel = state.openAIModel
-        commit(state.configurationMode == .isolatedProfile
-            ? "已切回本地 GPT；外部模型仍保留在 config_out"
-            : "已将 \(state.openAIModel) 设为新任务默认；自定义模型仍保留在菜单中")
+        commit("已清除默认委派；本地 GPT 与外部模型配置均未改动")
     }
 
     func activate(_ provider: ModelProvider) {
@@ -1390,9 +1244,7 @@ final class ManagerStore: ObservableObject {
         state.externalProviderID = provider.id
         state.activeProviderID = provider.id
         state.activeModel = provider.model.id
-        commit(state.configurationMode == .isolatedProfile
-            ? "已将 \(provider.name) · \(provider.model.id) 写入 config_out"
-            : "已将 \(provider.name) · \(provider.model.id) 设为新任务默认")
+        commit("已将 \(provider.name) · \(provider.model.id) 设为默认委派模型")
     }
 
     func importAntigravity(models: [String]) {
@@ -1432,7 +1284,7 @@ final class ManagerStore: ObservableObject {
             $0.isLetter || $0.isNumber ? $0 : "_"
         })
         selectedProviderID = "cmm_antigravity_\(selectedSuffix)"
-        commit("已将 \(uniqueModels.count) 个 Antigravity 模型导入 Codex；完全重启后在新任务中使用")
+        commit("已将 \(uniqueModels.count) 个 Antigravity 模型加入委派列表")
     }
 
     func deleteProvider(_ provider: ModelProvider) {
@@ -1450,18 +1302,8 @@ final class ManagerStore: ObservableObject {
     }
 
     func setConfigurationMode(_ mode: ConfigurationMode) {
-        guard state.configurationMode != mode else { return }
-        state.configurationMode = mode
-        if mode == .isolatedProfile,
-           let active = state.providers.first(where: { $0.id == state.activeProviderID }),
-           active.isAntigravityBridge {
-            state.activeProviderID = "openai"
-            state.activeModel = state.openAIModel
-        }
-        let message = mode == .isolatedProfile
-            ? "已切换为隔离配置；本地 config.toml 不再写入外部厂商"
-            : "已切换为桌面菜单兼容；重启 Codex 后在新任务中选择外部模型"
-        commit(message)
+        state.configurationMode = .desktopMenu
+        commit("已启用安全委派；config.toml 保持只读")
     }
 
     func openExternalProfile() {
@@ -1557,7 +1399,7 @@ struct ProviderEditor: View {
                 Spacer()
                 Text(protocolType.note)
                     .font(.caption)
-                    .foregroundStyle(protocolType.codexCompatible ? Color.green : Color.orange)
+                    .foregroundStyle(Color.green)
             }
 
             Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
@@ -1609,8 +1451,7 @@ struct ProviderEditor: View {
             TextField("显示名称（可选）", text: $displayName)
                 .textFieldStyle(.roundedBorder)
 
-            Toggle("保存后设为新任务默认模型", isOn: $activateAfterSave)
-                .disabled(!protocolType.codexCompatible)
+            Toggle("保存后设为默认委派模型", isOn: $activateAfterSave)
 
             if let errorText {
                 Text(errorText).font(.caption).foregroundStyle(.red)
@@ -1623,7 +1464,7 @@ struct ProviderEditor: View {
                     .keyboardShortcut(.cancelAction)
                 Spacer()
                 if isWorking { ProgressView().controlSize(.small) }
-                Button(activateAfterSave && protocolType.codexCompatible ? "测试、保存并设为新任务默认" : "测试并保存") {
+                Button(activateAfterSave ? "测试、保存并设为默认委派" : "测试并保存") {
                     Task { await verifyAndSave() }
                 }
                     .buttonStyle(.borderedProminent)
@@ -1692,7 +1533,7 @@ struct ProviderEditor: View {
                 enabled: existing?.enabled ?? true,
                 verifiedAt: Date()
             )
-            try onSave(provider, key, activateAfterSave && protocolType.codexCompatible)
+            try onSave(provider, key, activateAfterSave)
             dismiss()
         } catch {
             errorText = error.localizedDescription
@@ -1766,61 +1607,37 @@ struct ProviderDetail: View {
                         }
                     }
                     Spacer()
-                    if provider.wireProtocol.codexCompatible {
-                        let isActive = store.state.activeProviderID == provider.id
-                        Button(isActive
-                            ? (store.state.configurationMode == .isolatedProfile ? "外部配置默认" : "新任务默认")
-                            : (store.state.configurationMode == .isolatedProfile ? "设为外部配置默认" : "设为新任务默认")) {
-                            store.activate(provider)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(!provider.canActivate || isActive)
-                    } else {
-                        Text("需要 Responses 转换网关")
-                            .font(.caption).foregroundStyle(.orange)
+                    let isActive = store.state.activeProviderID == provider.id
+                    Button(isActive ? "默认委派" : "设为默认委派") {
+                        store.activate(provider)
                     }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!provider.canActivate || isActive)
                 }
             }
             .padding(14)
             .background(.background, in: RoundedRectangle(cornerRadius: 12))
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(.separator, lineWidth: 1))
 
-            if provider.isGeminiLike && !provider.isAntigravityBridge && provider.wireProtocol.codexCompatible {
-                Label(
-                    "Gemini 兼容：内置工具与函数工具同时出现时，路由器会自动移除内置工具，保留函数调用。",
-                    systemImage: "wrench.and.screwdriver"
-                )
-                .font(.caption)
-                .foregroundStyle(.orange)
-            }
-
             if provider.isAntigravityBridge {
                 Label(
-                    "实验桥接当前支持流式文本回复。Antigravity CLI 未提供 OpenAI 函数调用接口，因此 Codex 工具调用暂不可用。",
+                    "Antigravity 作为文本推理端运行；文件、终端和浏览器等本地工具仍由当前 Codex 任务执行。",
                     systemImage: "text.bubble"
                 )
                 .font(.caption)
-                .foregroundStyle(.orange)
+                .foregroundStyle(.secondary)
             }
 
-            if store.state.configurationMode == .desktopMenu {
-                Label(
-                    "Codex 会固定任务创建时的模型厂商。已有 ChatGPT 账号任务无法跨厂商切换；请新建任务，并在发送第一条消息前选择外部模型。",
-                    systemImage: "plus.square.on.square"
-                )
+            Label(
+                "当前 Codex 始终保持 GPT 和本地工具；delegate_task 只把你明确委派的文字任务发给这个模型，再把结果返回当前任务。",
+                systemImage: "arrow.triangle.branch"
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+            Text("每个厂商只保留一个模型。外部模型保存在独立配置中；~/.codex/config.toml 始终只读。")
                 .font(.caption)
-                .foregroundStyle(.orange)
-            }
-
-            if store.state.configurationMode == .isolatedProfile {
-                Text("每个厂商只保留一个模型。该模型写入独立的 config_out 配置，不会修改本地 config.toml；使用 \(store.externalProfileCommand) 启动外部模式。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } else {
-                Text("每个厂商只保留一个模型。桌面兼容模式会把已验证模型追加到 Codex 菜单，并由本地路由器按模型转发。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+                .foregroundStyle(.secondary)
             Spacer()
         }
         .padding(20)
@@ -1828,7 +1645,7 @@ struct ProviderDetail: View {
             Button("删除", role: .destructive) { store.deleteProvider(provider) }
             Button("取消", role: .cancel) {}
         } message: {
-            Text("将删除厂商、模型和钥匙串中的 API Key；Codex 配置会同步更新。")
+            Text("将删除厂商、模型、独立外部配置和钥匙串中的 API Key；config.toml 不受影响。")
         }
     }
 }
@@ -1921,13 +1738,13 @@ struct AntigravityPanel: View {
                     }
                     HStack {
                         Button(importedModels.isDisjoint(with: selectedModels)
-                            ? "测试并导入 Codex"
-                            : "重新测试并同步到 Codex") {
+                            ? "测试并加入委派"
+                            : "重新测试并同步委派") {
                             testAndImport()
                         }
                             .buttonStyle(.borderedProminent)
                             .disabled(isWorking || selectedModels.isEmpty)
-                        Text("通过测试后加入桌面新任务模型菜单")
+                        Text("通过测试后加入 delegate_task 可用模型")
                             .font(.caption2).foregroundStyle(.secondary)
                     }
                 }
@@ -2039,11 +1856,11 @@ struct ContentView: View {
                     Image(systemName: "switch.2")
                         .foregroundStyle(.tint)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("新任务默认：\(store.activeTitle)").font(.headline)
-                        Text("模型厂商会在任务创建时固定；切换默认值只影响新任务").font(.caption).foregroundStyle(.secondary)
+                        Text("安全委派：\(store.activeTitle)").font(.headline)
+                        Text("当前 Codex 保留 GPT 与本地工具，外部模型只处理委派的子任务").font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
-                    Button("新任务使用 GPT") { store.activateOpenAI() }
+                    Button("清除默认委派") { store.activateOpenAI() }
                         .disabled(store.state.activeProviderID == "openai")
                     Button {
                         editingProvider = nil
@@ -2071,34 +1888,17 @@ struct ContentView: View {
                 }
 
                 HStack(spacing: 10) {
-                    Picker("配置方式", selection: Binding(
-                        get: { store.state.configurationMode },
-                        set: { store.setConfigurationMode($0) }
-                    )) {
-                        ForEach(ConfigurationMode.allCases) { mode in
-                            Text(mode.title).tag(mode)
-                        }
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.segmented)
-                    .frame(width: 220)
-                    Text(store.state.configurationMode.description)
+                    Label("安全委派", systemImage: "arrow.triangle.branch")
+                        .font(.caption.weight(.semibold))
+                    Text("外部配置独立保存，config.toml 只读")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    if store.state.configurationMode == .desktopMenu {
-                        Text("完全重启 Codex 后新建任务")
-                            .font(.caption2)
-                            .foregroundStyle(.orange)
-                    } else {
-                        Text("不会出现在 Desktop 下拉菜单")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
                     Spacer()
-                    if store.state.configurationMode == .isolatedProfile {
-                        Button("打开外部 Codex") { store.openExternalProfile() }
-                        Button("复制命令") { store.copyExternalProfileCommand() }
-                    }
+                    Text("通过 delegate_task 调用")
+                        .font(.caption2)
+                        .foregroundStyle(.green)
+                    Button("打开外部 Codex") { store.openExternalProfile() }
+                    Button("复制命令") { store.copyExternalProfileCommand() }
                 }
             }
             .padding(14)
@@ -2272,11 +2072,13 @@ enum SelfTest {
             managesRuntime: false
         )
 
-        // Isolated mode must leave the local config byte-for-byte unchanged.
+        let originalConfig = "model = \"gpt-test\"\n\n[features]\nweb_search = true\n"
+
+        // Every synchronization path must leave config.toml byte-for-byte unchanged.
         try manager.syncConfiguration(state: &state)
         var baseRendered = try String(contentsOf: configURL, encoding: .utf8)
         var profileRendered = try String(contentsOf: profileURL, encoding: .utf8)
-        guard baseRendered == "model = \"gpt-test\"\n\n[features]\nweb_search = true\n",
+        guard baseRendered == originalConfig,
               profileRendered.contains("model = \"test-model\""),
               profileRendered.contains("model_provider = \"cmm_selftest\""),
               profileRendered.contains("model_catalog_json = \"\(dataURL.path)/external-model-catalog.json\""),
@@ -2284,7 +2086,7 @@ enum SelfTest {
               profileRendered.contains("args = [\"--print-key\", \"cmm_selftest\"]"),
               FileManager.default.fileExists(atPath: dataURL.appendingPathComponent("external-model-catalog.json").path),
               !baseRendered.contains(modelRouterProviderID) else {
-            throw ManagerError.message("隔离配置写入自检失败")
+            throw ManagerError.message("只读主配置自检失败")
         }
 
         state.providers[0].model.enabled = false
@@ -2292,7 +2094,7 @@ enum SelfTest {
         baseRendered = try String(contentsOf: configURL, encoding: .utf8)
         profileRendered = try String(contentsOf: profileURL, encoding: .utf8)
         guard state.activeProviderID == "openai",
-              baseRendered == "model = \"gpt-test\"\n\n[features]\nweb_search = true\n",
+              baseRendered == originalConfig,
               !profileRendered.contains("model_provider = \"cmm_selftest\""),
               !profileRendered.contains("[model_providers.cmm_selftest]") else {
             throw ManagerError.message("禁用回退自检失败")
@@ -2304,33 +2106,31 @@ enum SelfTest {
         state.configurationMode = .desktopMenu
         try manager.syncConfiguration(state: &state)
         baseRendered = try String(contentsOf: configURL, encoding: .utf8)
-        guard baseRendered.contains("model_provider = \"\(modelRouterProviderID)\""),
-              baseRendered.contains("model_catalog_json = \"\(dataURL.path)/active-model-catalog.json\""),
-              baseRendered.contains("[model_providers.\(modelRouterProviderID)]"),
-              !baseRendered.contains("[model_providers.cmm_selftest.auth]") else {
-            throw ManagerError.message("桌面兼容模式自检失败")
+        guard baseRendered == originalConfig,
+              !baseRendered.contains(modelRouterProviderID) else {
+            throw ManagerError.message("安全委派主配置只读自检失败")
         }
 
-        // Reopening the panel while desktop mode is active must preserve the
-        // current bridge instead of treating its marker as an old migration.
+        // Reopening the panel must also preserve the user's main configuration.
         try manager.saveState(state)
         var reopened = try manager.loadState()
         guard reopened.configurationMode == .desktopMenu else {
-            throw ManagerError.message("桌面兼容模式重启后状态丢失")
+            throw ManagerError.message("安全委派模式重启后状态丢失")
         }
         try manager.syncConfiguration(state: &reopened)
         baseRendered = try String(contentsOf: configURL, encoding: .utf8)
-        guard baseRendered.contains("model_provider = \"\(modelRouterProviderID)\"") else {
-            throw ManagerError.message("桌面兼容模式重启后路由器丢失")
+        guard baseRendered == originalConfig else {
+            throw ManagerError.message("重启后主配置发生变化")
         }
 
         state = reopened
         state.configurationMode = .isolatedProfile
         try manager.syncConfiguration(state: &state)
         baseRendered = try String(contentsOf: configURL, encoding: .utf8)
-        guard !baseRendered.contains(modelRouterProviderID),
-              baseRendered.contains("model = \"gpt-test\"") else {
-            throw ManagerError.message("隔离模式回退自检失败")
+        guard state.configurationMode == .desktopMenu,
+              baseRendered == originalConfig,
+              !baseRendered.contains(modelRouterProviderID) else {
+            throw ManagerError.message("旧模式迁移只读自检失败")
         }
         try manager.saveState(state)
         _ = try manager.loadState()
