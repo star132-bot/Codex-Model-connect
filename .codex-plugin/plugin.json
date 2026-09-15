@@ -1,6 +1,6 @@
 {
   "name": "codex-model-manager",
-  "version": "0.4.0+codex.20260915034011",
+  "version": "0.4.1+codex.20260915115226",
   "description": "Manage external models, delegate subtasks, and switch complete Codex config and auth profiles.",
   "author": {
     "name": "Local developer"

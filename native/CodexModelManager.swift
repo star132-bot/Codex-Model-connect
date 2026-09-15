@@ -1998,6 +1998,7 @@ struct ProviderDetail: View {
 
 struct AntigravityPanel: View {
     @ObservedObject var store: ManagerStore
+    @Environment(\.dismiss) private var dismiss
     @State private var snapshot = AntigravitySnapshot()
     @State private var selectedModels = Set<String>()
     @State private var isWorking = false
@@ -2027,6 +2028,9 @@ struct AntigravityPanel: View {
                 if let version = snapshot.version {
                     Text(version).font(.caption.monospaced()).foregroundStyle(.secondary)
                 }
+                Button("关闭") { dismiss() }
+                    .buttonStyle(.bordered)
+                    .keyboardShortcut(.cancelAction)
             }
 
             HStack(spacing: 8) {

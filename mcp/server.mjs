@@ -6,7 +6,7 @@ import { homedir, platform } from "node:os";
 import { delimiter, join } from "node:path";
 import { spawn } from "node:child_process";
 
-const SERVER = { name: "codex-model-manager-delegate", version: "0.4.0" };
+const SERVER = { name: "codex-model-manager-delegate", version: "0.4.1" };
 const keyCache = new Map();
 
 function codexHome() {
